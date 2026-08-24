@@ -1,5 +1,6 @@
 package com.kyant.amdl.scene
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,7 +10,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import com.kyant.amdl.ui.SettingsListDivider
 import com.kyant.amdl.ui.SettingsListItem
 import com.kyant.amdl.ui.SettingsListSection
@@ -19,6 +22,8 @@ import java.util.Locale
 
 @Composable
 fun SettingsScene(appState: AppState) {
+    val context = LocalContext.current
+
     val downloadPathPicker = appState.downloadPathPicker()
 
     Column(
@@ -80,9 +85,14 @@ fun SettingsScene(appState: AppState) {
         }
 
         SettingsListSection("关于") {
+            val repoUrl = "https://github.com/Kyant0/AMDL"
             SettingsListItem(
                 title = "GitHub",
-                subtitle = "https://github.com/Kyant/AMDL",
+                subtitle = repoUrl,
+                onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, repoUrl.toUri())
+                    context.startActivity(intent)
+                }
             )
         }
     }
