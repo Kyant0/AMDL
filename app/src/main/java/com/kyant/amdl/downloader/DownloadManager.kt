@@ -229,10 +229,10 @@ class DownloadManager(
                     val fileName =
                         if (task.config.saveByAlbum) {
                             buildString {
-                                append(metadata?.albumArtistName ?: "Unknown Artist")
+                                append(metadata?.albumArtistName?.sanitize() ?: "Unknown Artist")
                                 append("/")
 
-                                append(metadata?.albumName ?: "Unknown Album")
+                                append(metadata?.albumName?.sanitize() ?: "Unknown Album")
                                 append("/")
 
                                 if (discNumber != null && trackNumber != null) {
@@ -245,10 +245,10 @@ class DownloadManager(
                                         append(" ")
                                     }
                                 }
-                                append(metadata?.name ?: "Unknown Title")
+                                append(metadata?.name?.sanitize() ?: "Unknown Title")
                             }
                         } else {
-                            "${metadata?.artistName ?: "Unknown Artist"} - ${metadata?.name ?: "Unknown Title"}"
+                            "${metadata?.artistName?.sanitize() ?: "Unknown Artist"} - ${metadata?.name?.sanitize() ?: "Unknown Title"}"
                         }
 
                     if (artwork != null) {
@@ -298,3 +298,13 @@ class DownloadManager(
         }
     }
 }
+
+private fun String.sanitize(): String? {
+    return if (this.isNotBlank()) {
+        this.trim().replace(FileNameSanitizeRegex, "-")
+    } else {
+        null
+    }
+}
+
+private val FileNameSanitizeRegex = Regex("[\\\\/:*?\"<>|]")
