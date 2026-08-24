@@ -39,7 +39,7 @@ class DataStore(context: Context) {
     private val mediaUserToken = Value(stringPreferencesKey("media_user_token"), "")
     private val language = Value(stringPreferencesKey("language"), "zh-Hans-CN")
     private val downloadPath = Value(stringPreferencesKey("download_path"), "")
-    private val saveByAlbum = Value(booleanPreferencesKey("save_by_album"), false)
+    private val saveByAlbum = Value(booleanPreferencesKey("save_by_album"), true)
     private val saveTtml = Value(booleanPreferencesKey("save_ttml"), true)
 
     val tokens: AmTokens by derivedStateOf {

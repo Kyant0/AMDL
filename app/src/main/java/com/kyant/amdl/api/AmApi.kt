@@ -41,8 +41,7 @@ data class AmApi(
 
     suspend fun getTracks(url: String): List<Track> {
         val url = runCatching { Url(url) }.getOrNull() ?: return emptyList()
-        // "https://music.apple.com/cn/song/you/1559745848"
-        // "https://music.apple.com/cn/album/too-fast-to-live-too-young-to-die-alts-ep/6797664550"
+
         if (url.host != "music.apple.com" && url.host != "beta.music.apple.com") {
             return emptyList()
         }
@@ -51,6 +50,7 @@ data class AmApi(
         if (segments.size < 2) {
             return emptyList()
         }
+
         val storefront = segments[0]
         if (storefront == "library") {
             return emptyList()
@@ -82,7 +82,7 @@ data class AmApi(
             client
                 .get(url) {
                     parameter("extend", "ttmlLocalizations")
-                    parameter("include", "lyrics,syllable-lyrics")
+                    parameter("include", "albums,lyrics,syllable-lyrics")
                     parameter("l", language)
                 }
                 .bodyOrNull<JsonObject>()
@@ -99,6 +99,8 @@ data class AmApi(
             composerName = attr?.get("composerName")?.jsonPrimitive?.content,
             genreNames = attr?.get("genreNames")?.jsonArray?.mapNotNull { it.jsonPrimitive.content },
             releaseDate = attr?.get("releaseDate")?.jsonPrimitive?.content,
+            albumReleaseDate = relationships?.get("albums")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject
+                ?.get("attributes")?.jsonObject?.get("releaseDate")?.jsonPrimitive?.content,
             isrc = attr?.get("isrc")?.jsonPrimitive?.content,
             lyrics = relationships?.get("lyrics")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject["attributes"]
                 ?.jsonObject?.get("ttml")?.jsonPrimitive?.content,

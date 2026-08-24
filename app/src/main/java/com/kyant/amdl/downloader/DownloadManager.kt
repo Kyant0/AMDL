@@ -232,18 +232,20 @@ class DownloadManager(
                                 append(metadata?.albumArtistName?.sanitize() ?: "Unknown Artist")
                                 append("/")
 
+                                metadata?.albumReleaseDate?.substringBefore('-')?.sanitize()?.let {
+                                    append(it)
+                                    append(" - ")
+                                }
                                 append(metadata?.albumName?.sanitize() ?: "Unknown Album")
                                 append("/")
 
-                                if (discNumber != null && trackNumber != null) {
-                                    if (discCount != null && discCount > 1) {
-                                        append(discNumber.toString().padStart(2, '0'))
+                                if (trackNumber != null && (trackCount == null || trackCount > 1)) {
+                                    if (discNumber != null && (discCount == null || discCount > 1)) {
+                                        append(discNumber.toString())
                                         append("-")
                                     }
-                                    if (trackCount != null && trackCount > 1) {
-                                        append(trackNumber.toString().padStart(2, '0'))
-                                        append(" ")
-                                    }
+                                    append(trackNumber.toString().padStart(2, '0'))
+                                    append(" - ")
                                 }
                                 append(metadata?.name?.sanitize() ?: "Unknown Title")
                             }
