@@ -57,13 +57,13 @@ fun SettingsScene(appState: AppState) {
         SettingsListSection("下载") {
             SettingsListItem(
                 title = "下载位置",
-                subtitle = appState.config.downloadPath.removePrefix("/storage/emulated/0/").ifEmpty { "未设置" },
+                subtitle = appState.config.downloadPath.removePrefix("/storage/emulated/0").ifEmpty { "未设置" },
                 onClick = { downloadPathPicker.launch(null) }
             )
             SettingsListDivider()
             SettingsListItem(
-                title = "按专辑保存",
-                subtitle = "将下载的歌曲按专辑保存到不同的文件夹中",
+                title = "按专辑目录保存歌曲文件",
+                subtitle = "开启后，歌曲将保存至艺人的专辑目录；关闭后，所有歌曲将保存至同一目录",
                 action = {
                     Switch(
                         checked = { appState.config.saveByAlbum },
@@ -73,8 +73,7 @@ fun SettingsScene(appState: AppState) {
             )
             SettingsListDivider()
             SettingsListItem(
-                title = "保存逐字歌词",
-                subtitle = "将下载的逐字歌词保存为 TTML 文件",
+                title = "保存 TTML 逐字歌词文件",
                 action = {
                     Switch(
                         checked = { appState.config.saveTtml },

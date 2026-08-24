@@ -56,7 +56,7 @@ fun SetupWizardScene(appState: AppState) {
                 .padding(16f.dp, 32f.dp)
         ) {
             BasicText(
-                "登录 Apple Music 账号",
+                "登录 Apple Music 账户",
                 style = TextStyle(Palette.content, 18f.sp)
             )
         }
