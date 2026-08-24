@@ -32,7 +32,7 @@ fun ttmlToLrc(xml: String): String {
             }
 
             XmlPullParser.TEXT -> {
-                if (skipDepth == 0 && time != null) {
+                if (skipDepth == 0) {
                     text.append(p.text)
                 }
             }
@@ -46,12 +46,11 @@ fun ttmlToLrc(xml: String): String {
                     }
 
                     "p" -> {
-                        time?.let {
-                            out.append("[${it.toLrcTime()}]")
-                                .append(text.toString().trim())
-                                .append('\n')
+                        if (time != null) {
+                            out.append("[${time.toLrcTime()}]")
+                            time = null
                         }
-                        time = null
+                        out.append(text.toString().trim()).append('\n')
                     }
                 }
             }
