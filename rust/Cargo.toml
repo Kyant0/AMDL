@@ -1,0 +1,21 @@
+[package]
+name = "amdl-android"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "amdl"
+crate-type = ["cdylib"]
+
+[dependencies]
+aes = "0.9"
+bytes = "1.10"
+ctr = "0.10"
+jni = "0.22"
+mp4ameta = "0.13"
+widevine = "0.1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
