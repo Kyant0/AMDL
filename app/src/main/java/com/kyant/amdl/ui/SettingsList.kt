@@ -77,6 +77,7 @@ fun SettingsListItem(
                 )
             }
         }
+
         if (action != null) {
             action()
         }
