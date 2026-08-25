@@ -125,7 +125,7 @@ fun MainScene(appState: AppState) {
                             style = TextStyle(Palette.content, 16f.sp)
                         )
                         BasicText(
-                            task.error ?: "未知错误",
+                            (task.status as? Task.Status.Failed)?.error ?: "未知错误",
                             style = TextStyle(Color.Red, 14f.sp)
                         )
                     }
@@ -156,12 +156,12 @@ fun MainScene(appState: AppState) {
                         )
                         BasicText(
                             when (task.status) {
-                                Task.Status.Pending -> "等待中"
-                                Task.Status.Preparing -> "准备中"
-                                Task.Status.Downloading -> "下载中"
-                                Task.Status.Processing -> "处理中"
-                                Task.Status.Completed -> "已完成"
-                                Task.Status.Failed -> "失败"
+                                is Task.Status.Pending -> "等待中"
+                                is Task.Status.Preparing -> "准备中"
+                                is Task.Status.Downloading -> "下载中"
+                                is Task.Status.Processing -> "处理中"
+                                is Task.Status.Completed -> "已完成"
+                                is Task.Status.Failed -> "失败"
                             },
                             style = TextStyle(Palette.content.copy(0.6f), 14f.sp)
                         )

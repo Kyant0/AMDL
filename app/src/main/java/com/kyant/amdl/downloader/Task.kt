@@ -11,15 +11,14 @@ data class Task(
     val config: UserConfig
 ) {
 
-    var status by mutableStateOf(Status.Pending)
-    var error by mutableStateOf<String?>(null)
+    var status: Status by mutableStateOf(Status.Pending)
 
-    enum class Status {
-        Pending,
-        Preparing,
-        Downloading,
-        Processing,
-        Completed,
-        Failed
+    sealed interface Status {
+        object Pending : Status
+        object Preparing : Status
+        data object Downloading : Status
+        object Processing : Status
+        object Completed : Status
+        data class Failed(val error: String?) : Status
     }
 }

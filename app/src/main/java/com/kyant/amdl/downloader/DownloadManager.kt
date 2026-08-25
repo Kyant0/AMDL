@@ -22,17 +22,12 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.decrementAndFetch
-import kotlin.concurrent.atomics.update
 import kotlin.io.encoding.Base64
 import kotlin.io.outputStream
 import kotlin.io.writeText
 import kotlin.use
 import kotlin.uuid.Uuid
 
-@OptIn(ExperimentalAtomicApi::class)
 class DownloadManager(
     initialTokens: AmTokens,
     initialLanguage: String
@@ -40,7 +35,6 @@ class DownloadManager(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val channel = Channel<Task>(Channel.UNLIMITED)
-    private val runningTasks = AtomicInt(0)
 
     private val api = MutableStateFlow(AmApi(initialTokens, initialLanguage))
     private val cdm = Cdm()
@@ -118,7 +112,6 @@ class DownloadManager(
         if (tasks.isEmpty()) return
         tasks.forEach { it.status = Task.Status.Pending }
         this.tasks.update { it + tasks }
-        runningTasks.update { it + tasks.size }
         tasks.forEach { channel.trySend(it) }
     }
 
@@ -301,19 +294,20 @@ class DownloadManager(
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            task.error = e.message
-            task.status = Task.Status.Failed
+            task.status = Task.Status.Failed(e.message)
         } finally {
-            checkTasks()
-        }
-    }
-
-    private fun checkTasks() {
-        if (runningTasks.decrementAndFetch() > 0) return
-        val tasks = tasks.getAndUpdate { emptyList() }
-        val newFailedTasks = tasks.filter { it.status == Task.Status.Failed }
-        if (newFailedTasks.isNotEmpty()) {
-            failedTasks.update { it + newFailedTasks }
+            var taskToRemove: Task? = null
+            tasks.update { tasks ->
+                if (task in tasks) {
+                    taskToRemove = task
+                    tasks - task
+                } else {
+                    tasks
+                }
+            }
+            if (taskToRemove != null && task.status is Task.Status.Failed) {
+                failedTasks.update { it + taskToRemove }
+            }
         }
     }
 }
