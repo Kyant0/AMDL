@@ -17,6 +17,7 @@ import io.ktor.http.Url
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -91,6 +92,8 @@ data class AmApi(
 
         val attr = json["attributes"]?.jsonObject
         val relationships = json["relationships"]?.jsonObject
+        val albumAttr =
+            relationships?.get("albums")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject?.get("attributes")?.jsonObject
         return TrackMetadata(
             name = attr?.get("name")?.jsonPrimitive?.content,
             artistName = attr?.get("artistName")?.jsonPrimitive?.content,
@@ -99,8 +102,9 @@ data class AmApi(
             composerName = attr?.get("composerName")?.jsonPrimitive?.content,
             genreNames = attr?.get("genreNames")?.jsonArray?.mapNotNull { it.jsonPrimitive.content },
             releaseDate = attr?.get("releaseDate")?.jsonPrimitive?.content,
-            albumReleaseDate = relationships?.get("albums")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject
-                ?.get("attributes")?.jsonObject?.get("releaseDate")?.jsonPrimitive?.content,
+            albumReleaseDate = albumAttr?.get("releaseDate")?.jsonPrimitive?.content,
+            isSingle = albumAttr?.get("isSingle")?.jsonPrimitive?.boolean,
+            isCompilation = albumAttr?.get("isCompilation")?.jsonPrimitive?.boolean,
             isrc = attr?.get("isrc")?.jsonPrimitive?.content,
             lyrics = relationships?.get("lyrics")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject["attributes"]
                 ?.jsonObject?.get("ttml")?.jsonPrimitive?.content,

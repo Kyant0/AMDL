@@ -73,6 +73,17 @@ fun SettingsScene(appState: AppState) {
             )
             SettingsListDivider()
             SettingsListItem(
+                title = "归并单曲",
+                subtitle = "单曲将保存至艺人的 \"Singles\" 目录下",
+                action = {
+                    Switch(
+                        checked = { appState.config.mergeSingles },
+                        onCheckedChange = { appState.setMergeSingles(it) }
+                    )
+                }
+            )
+            SettingsListDivider()
+            SettingsListItem(
                 title = "保存 TTML 逐字歌词文件",
                 action = {
                     Switch(

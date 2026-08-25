@@ -1,6 +1,6 @@
 package com.kyant.amdl.engine
 
-class M4aFile(private val data: ByteArray) : AutoCloseable {
+class M4aTagger(private val data: ByteArray) : AutoCloseable {
 
     private val tagPtr: Long = RustLib.readM4aTag(data)
 

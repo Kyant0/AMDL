@@ -98,6 +98,10 @@ class AppState(private val context: Context) {
         dataStore.setSaveByAlbum(value)
     }
 
+    fun setMergeSingles(value: Boolean) {
+        dataStore.setMergeSingles(value)
+    }
+
     fun setSaveTtml(value: Boolean) {
         dataStore.setSaveTtml(value)
     }

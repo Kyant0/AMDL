@@ -40,6 +40,7 @@ class DataStore(context: Context) {
     private val language = Value(stringPreferencesKey("language"), "zh-Hans-CN")
     private val downloadPath = Value(stringPreferencesKey("download_path"), "")
     private val saveByAlbum = Value(booleanPreferencesKey("save_by_album"), true)
+    private val mergeSingles = Value(booleanPreferencesKey("merge_singles"), false)
     private val saveTtml = Value(booleanPreferencesKey("save_ttml"), true)
 
     val tokens: AmTokens by derivedStateOf {
@@ -54,6 +55,7 @@ class DataStore(context: Context) {
             language = language.value,
             downloadPath = downloadPath.value,
             saveByAlbum = saveByAlbum.value,
+            mergeSingles = mergeSingles.value,
             saveTtml = saveTtml.value
         )
     }
@@ -73,6 +75,10 @@ class DataStore(context: Context) {
 
     fun setSaveByAlbum(value: Boolean) {
         saveByAlbum.value = value
+    }
+
+    fun setMergeSingles(value: Boolean) {
+        mergeSingles.value = value
     }
 
     fun setSaveTtml(value: Boolean) {

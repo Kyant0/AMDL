@@ -9,6 +9,8 @@ data class TrackMetadata(
     val genreNames: List<String>?,
     val releaseDate: String?,
     val albumReleaseDate: String?,
+    val isSingle: Boolean?,
+    val isCompilation: Boolean?,
     val isrc: String?,
     val lyrics: String?,
     val syllableLyrics: String?
