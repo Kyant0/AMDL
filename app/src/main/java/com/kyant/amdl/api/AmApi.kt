@@ -1,28 +1,11 @@
 package com.kyant.amdl.api
 
-import io.ktor.client.HttpClient
-import io.ktor.client.call.body
-import io.ktor.client.engine.android.Android
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.client.plugins.defaultRequest
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.request.parameter
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.HttpHeaders
-import io.ktor.http.Url
-import io.ktor.http.isSuccess
-import io.ktor.serialization.kotlinx.json.json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import androidx.core.net.toUri
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlin.io.encoding.Base64
 
 data class AmApi(
@@ -30,24 +13,22 @@ data class AmApi(
     private val language: String
 ) {
 
-    private val client = createAuthedClient()
-
     suspend fun getBytes(url: String): ByteArray? {
-        return client.get(url).bodyOrNull()
+        return httpGet(url) { readBytes() }
     }
 
     suspend fun getText(url: String): String? {
-        return client.get(url).bodyAsTextOrNull()
+        return httpGet(url) { readBytes().decodeToString() }
     }
 
     suspend fun getTracks(url: String): List<Track> {
-        val url = runCatching { Url(url) }.getOrNull() ?: return emptyList()
+        val uri = url.toUri()
 
-        if (url.host != "music.apple.com" && url.host != "beta.music.apple.com") {
+        if (uri.host != "music.apple.com" && uri.host != "beta.music.apple.com") {
             return emptyList()
         }
 
-        val segments = url.segments
+        val segments = uri.pathSegments
         if (segments.size < 2) {
             return emptyList()
         }
@@ -64,7 +45,7 @@ data class AmApi(
             }
 
             "album" -> {
-                val songId = url.parameters["i"]
+                val songId = uri.getQueryParameter("i")
                 if (songId != null) {
                     getTracksFromSong(storefront, songId)
                 } else {
@@ -78,145 +59,181 @@ data class AmApi(
     }
 
     suspend fun getTrackMetadata(track: Track): TrackMetadata? {
-        val url = "https://amp-api.music.apple.com/v1/catalog/${track.storefront}/songs/${track.id}"
+        val url =
+            "https://amp-api.music.apple.com/v1/catalog/${track.storefront}/songs/${track.id}?l=$language&include=albums,lyrics,syllable-lyrics&extend=ttmlLocalizations"
         val json =
-            client
-                .get(url) {
-                    parameter("extend", "ttmlLocalizations")
-                    parameter("include", "albums,lyrics,syllable-lyrics")
-                    parameter("l", language)
-                }
-                .bodyOrNull<JsonObject>()
-                ?.get("data")?.jsonArray?.firstOrNull()?.jsonObject
+            httpGet(url) { JsonObject(readBytes().decodeToString()) }
+                ?.getArrayOrNull("data")?.getObjectOrNull(0)
                 ?: return null
 
-        val attr = json["attributes"]?.jsonObject
-        val relationships = json["relationships"]?.jsonObject
+        val attr = json.getObjectOrNull("attributes")
+        val relationships = json.getObjectOrNull("relationships")
         val albumAttr =
-            relationships?.get("albums")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject?.get("attributes")?.jsonObject
+            relationships?.getObjectOrNull("albums")
+                ?.getArrayOrNull("data")?.getObjectOrNull(0)
+                ?.getObjectOrNull("attributes")
         return TrackMetadata(
-            name = attr?.get("name")?.jsonPrimitive?.content,
-            artistName = attr?.get("artistName")?.jsonPrimitive?.content,
-            albumName = attr?.get("albumName")?.jsonPrimitive?.content,
-            albumArtistName = attr?.get("albumArtistName")?.jsonPrimitive?.content,
-            composerName = attr?.get("composerName")?.jsonPrimitive?.content,
-            genreNames = attr?.get("genreNames")?.jsonArray?.mapNotNull { it.jsonPrimitive.content },
-            releaseDate = attr?.get("releaseDate")?.jsonPrimitive?.content,
-            albumReleaseDate = albumAttr?.get("releaseDate")?.jsonPrimitive?.content,
-            isSingle = albumAttr?.get("isSingle")?.jsonPrimitive?.boolean,
-            isCompilation = albumAttr?.get("isCompilation")?.jsonPrimitive?.boolean,
-            isrc = attr?.get("isrc")?.jsonPrimitive?.content,
-            lyrics = relationships?.get("lyrics")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject["attributes"]
-                ?.jsonObject?.get("ttml")?.jsonPrimitive?.content,
-            syllableLyrics = relationships?.get("syllable-lyrics")?.jsonObject?.get("data")?.jsonArray?.firstOrNull()?.jsonObject["attributes"]
-                ?.jsonObject?.get("ttmlLocalizations")?.jsonPrimitive?.content
+            name = attr?.getStringOrNull("name"),
+            artistName = attr?.getStringOrNull("artistName"),
+            albumName = attr?.getStringOrNull("albumName"),
+            albumArtistName = attr?.getStringOrNull("albumArtistName"),
+            composerName = attr?.getStringOrNull("composerName"),
+            genreNames = attr?.getArrayOrNull("genreNames")?.asSequence<String>()?.toList(),
+            releaseDate = attr?.getStringOrNull("releaseDate"),
+            albumReleaseDate = albumAttr?.getStringOrNull("releaseDate"),
+            isSingle = albumAttr?.getBooleanOrNull("isSingle"),
+            isCompilation = albumAttr?.getBooleanOrNull("isCompilation"),
+            isrc = attr?.getStringOrNull("isrc"),
+            lyrics =
+                relationships?.getObjectOrNull("lyrics")
+                    ?.getArrayOrNull("data")?.getObjectOrNull(0)
+                    ?.getObjectOrNull("attributes")
+                    ?.getStringOrNull("ttml"),
+            syllableLyrics =
+                relationships?.getObjectOrNull("syllable-lyrics")
+                    ?.getArrayOrNull("data")?.getObjectOrNull(0)
+                    ?.getObjectOrNull("attributes")
+                    ?.getStringOrNull("ttmlLocalizations")
         )
     }
 
     suspend fun getSongAsset(id: String): JsonObject? {
-        return client
-            .post("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback") {
-                header(HttpHeaders.ContentType, "application/json")
-                setBody(buildJsonObject {
-                    put("salableAdamId", id)
-                    parameter("l", language)
-                })
-            }
-            .bodyOrNull<JsonObject>()
-            ?.get("songList")?.jsonArray?.firstOrNull()?.jsonObject
-            ?.get("assets")?.jsonArray
-            ?.find { it.jsonObject["flavor"]?.jsonPrimitive?.content == "28:ctrp256" }?.jsonObject
+        val url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback?l=$language"
+        val body =
+            buildJsonObject {
+                put("salableAdamId", id)
+            }.toString()
+        return httpPost(url, body) { JsonObject(readBytes().decodeToString()) }
+            ?.getArrayOrNull("songList")?.getObjectOrNull(0)
+            ?.getArrayOrNull("assets")?.asSequence<JsonObject>()
+            ?.find { it.getStringOrNull("flavor") == "28:ctrp256" }
     }
 
     suspend fun getLicense(challenge: ByteArray, uri: String, adamId: String): ByteArray? {
-        val response =
-            client
-                .post("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense") {
-                    header(HttpHeaders.ContentType, "application/json")
-                    setBody(
-                        buildJsonObject {
-                            put("challenge", Base64.encode(challenge))
-                            put("key-system", "com.widevine.alpha")
-                            put("uri", uri)
-                            put("adamId", adamId)
-                            put("user-initiated", true)
-                        }
-                    )
-                }
-                .bodyOrNull<JsonObject>()
-                ?: return null
-        val license = response["license"]?.jsonPrimitive?.content ?: return null
-        return Base64.decode(license)
-    }
-
-    private fun createAuthedClient(): HttpClient {
-        return HttpClient(Android) {
-            defaultRequest {
-                header(HttpHeaders.Origin, "https://music.apple.com")
-                header(HttpHeaders.Referrer, "https://music.apple.com/")
-                header(HttpHeaders.Accept, "application/json")
-                header(HttpHeaders.Authorization, "Bearer ${tokens.devToken}")
-                header(HttpHeaders.Cookie, "media-user-token=${tokens.mediaUserToken}")
-            }
-
-            install(ContentNegotiation) {
-                json()
-            }
-        }
+        val url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
+        val body =
+            buildJsonObject {
+                put("challenge", Base64.encode(challenge))
+                put("key-system", "com.widevine.alpha")
+                put("uri", uri)
+                put("adamId", adamId)
+                put("user-initiated", true)
+            }.toString()
+        return httpPost(url, body) { JsonObject(readBytes().decodeToString()) }
+            ?.getStringOrNull("license")
+            ?.let { Base64.decode(it) }
     }
 
     private suspend fun getTracksFromSong(storefront: String, id: String): List<Track> {
-        val url = "https://amp-api.music.apple.com/v1/catalog/$storefront/songs/$id"
+        val url = "https://amp-api.music.apple.com/v1/catalog/$storefront/songs/$id?l=$language"
         val json =
-            client
-                .get(url) {
-                    parameter("l", language)
-                }
-                .bodyOrNull<JsonObject>()
-                ?.get("data")?.jsonArray?.firstOrNull()?.jsonObject
+            httpGet(url) { JsonObject(readBytes().decodeToString()) }
+                ?.getArrayOrNull("data")?.getObjectOrNull(0)
                 ?: return emptyList()
-        val attr = json["attributes"]?.jsonObject
+        val attr = json.getObjectOrNull("attributes")
         return listOf(
             Track(
                 storefront = storefront,
-                id = json["id"]?.jsonPrimitive?.content.orEmpty(),
-                name = attr?.get("name")?.jsonPrimitive?.content.orEmpty(),
-                artistName = attr?.get("artistName")?.jsonPrimitive?.content.orEmpty(),
-                artwork = attr?.get("artwork")?.jsonObject?.let { resolveArtworkUrl(it) }?.let { Artwork(it) }
+                id = json.getStringOrNull("id") ?: return emptyList(),
+                name = attr?.getStringOrNull("name").orEmpty(),
+                artistName = attr?.getStringOrNull("artistName").orEmpty(),
+                artwork =
+                    attr?.getObjectOrNull("artwork")
+                        ?.let { resolveArtworkUrl(it) }
+                        ?.let { Artwork(it) }
             )
         )
     }
 
     private suspend fun getTracksFromAlbum(storefront: String, id: String): List<Track> {
-        val url = "https://amp-api.music.apple.com/v1/catalog/$storefront/albums/$id"
+        val url = "https://amp-api.music.apple.com/v1/catalog/$storefront/albums/$id?l=$language"
         val json =
-            client
-                .get(url) {
-                    parameter("l", language)
-                }
-                .bodyOrNull<JsonObject>()
-                ?.get("data")?.jsonArray?.firstOrNull()?.jsonObject
+            httpGet(url) { JsonObject(readBytes().decodeToString()) }
+                ?.getArrayOrNull("data")?.getObjectOrNull(0)
                 ?: return emptyList()
         val artwork =
-            json["attributes"]?.jsonObject?.get("artwork")?.jsonObject?.let { resolveArtworkUrl(it) }
+            json.getObjectOrNull("attributes")
+                ?.getObjectOrNull("artwork")
+                ?.let { resolveArtworkUrl(it) }
                 ?.let { CachedArtwork(it) }
-        return json["relationships"]?.jsonObject?.get("tracks")?.jsonObject?.get("data")?.jsonArray?.mapNotNull { trackJson ->
-            val attr = trackJson.jsonObject["attributes"]?.jsonObject
-            Track(
-                storefront = storefront,
-                id = trackJson.jsonObject["id"]?.jsonPrimitive?.content.orEmpty(),
-                name = attr?.get("name")?.jsonPrimitive?.content.orEmpty(),
-                artistName = attr?.get("artistName")?.jsonPrimitive?.content.orEmpty(),
-                artwork = artwork
-            )
-        }.orEmpty()
+        return json.getObjectOrNull("relationships")
+            ?.getObjectOrNull("tracks")
+            ?.getArrayOrNull("data")?.asSequence<JsonObject>()
+            ?.mapNotNull { trackJson ->
+                val attr = trackJson.getObjectOrNull("attributes") ?: return@mapNotNull null
+                Track(
+                    storefront = storefront,
+                    id = trackJson.getStringOrNull("id") ?: return@mapNotNull null,
+                    name = attr.getStringOrNull("name").orEmpty(),
+                    artistName = attr.getStringOrNull("artistName").orEmpty(),
+                    artwork = artwork
+                )
+            }
+            ?.toList()
+            .orEmpty()
     }
+
+    private suspend inline fun <T> httpGet(
+        url: String,
+        crossinline block: InputStream.() -> T
+    ): T? =
+        withContext(Dispatchers.IO) {
+            val url = URL(url)
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                setRequestProperty("Origin", "https://music.apple.com")
+                setRequestProperty("Referrer", "https://music.apple.com/")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Authorization", "Bearer ${tokens.devToken}")
+                setRequestProperty("Cookie", "media-user-token=${tokens.mediaUserToken}")
+            }
+            try {
+                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                    null
+                } else {
+                    connection.inputStream.block()
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+
+    private suspend inline fun <T> httpPost(
+        url: String,
+        body: String,
+        crossinline block: InputStream.() -> T
+    ): T? =
+        withContext(Dispatchers.IO) {
+            val url = URL(url)
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Origin", "https://music.apple.com")
+                setRequestProperty("Referrer", "https://music.apple.com/")
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Authorization", "Bearer ${tokens.devToken}")
+                setRequestProperty("Cookie", "media-user-token=${tokens.mediaUserToken}")
+            }
+
+            try {
+                connection.outputStream.use {
+                    it.write(body.toByteArray(Charsets.UTF_8))
+                }
+                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                    null
+                } else {
+                    connection.inputStream.block()
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
 }
 
 private fun resolveArtworkUrl(artwork: JsonObject): String? {
-    var url = artwork["url"]?.jsonPrimitive?.content ?: return null
-    val width = artwork["width"]?.jsonPrimitive?.content
-    val height = artwork["height"]?.jsonPrimitive?.content
+    var url = artwork.getStringOrNull("url") ?: return null
+    val width = artwork.getStringOrNull("width")
+    val height = artwork.getStringOrNull("height")
     url = url
         .replace("{c}", "bb")
         .replace("{f}", "png")
@@ -226,20 +243,4 @@ private fun resolveArtworkUrl(artwork: JsonObject): String? {
             .replace("{h}", height)
     }
     return url
-}
-
-private suspend inline fun <reified T> HttpResponse.bodyOrNull(): T? {
-    return if (status.isSuccess()) {
-        body()
-    } else {
-        null
-    }
-}
-
-private suspend fun HttpResponse.bodyAsTextOrNull(): String? {
-    return if (status.isSuccess()) {
-        bodyAsText()
-    } else {
-        null
-    }
 }

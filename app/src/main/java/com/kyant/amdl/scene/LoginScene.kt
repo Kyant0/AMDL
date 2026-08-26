@@ -44,10 +44,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 import com.kyant.amdl.api.AmTokens
 import com.kyant.amdl.ui.Block
 import com.kyant.amdl.ui.Palette
-import io.ktor.http.Url
 import kotlinx.coroutines.flow.collectLatest
 
 @Composable
@@ -202,8 +202,10 @@ fun LoginScene(appState: AppState) {
 
                             if (devToken == null) {
                                 if (url.contains("devToken")) {
-                                    val url = Url(url)
-                                    devToken = url.parameters["devToken"]
+                                    try {
+                                        devToken = url.toUri().getQueryParameter("devToken")
+                                    } catch (_: Exception) {
+                                    }
                                 }
                             }
 

@@ -9,10 +9,8 @@ datastore = "1.2.1"
 lifecycle = "2.11.0"
 
 kotlinxCoroutines = "1.11.0"
-kotlinxSerialization = "1.11.0"
-ktor = "3.5.2"
 
-kyantShapes = "1.2.0"
+kyantShapes = "1.2.1"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity" }
@@ -26,12 +24,6 @@ androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "l
 androidx-lifecycle-runtime = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 
 kotlinx-coroutines = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
-kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
-
-ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
-ktor-client-android = { module = "io.ktor:ktor-client-android", version.ref = "ktor" }
-ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
-ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
 
 kyant-shapes = { group = "io.github.kyant0", name = "shapes", version.ref = "kyantShapes" }
 

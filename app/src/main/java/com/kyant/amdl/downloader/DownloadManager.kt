@@ -2,6 +2,9 @@ package com.kyant.amdl.downloader
 
 import com.kyant.amdl.api.AmApi
 import com.kyant.amdl.api.AmTokens
+import com.kyant.amdl.api.getIntOrNull
+import com.kyant.amdl.api.getObjectOrNull
+import com.kyant.amdl.api.getStringOrNull
 import com.kyant.amdl.api.ttmlToLrc
 import com.kyant.amdl.engine.Cdm
 import com.kyant.amdl.engine.M4aIdent
@@ -18,9 +21,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.outputStream
@@ -124,7 +124,7 @@ class DownloadManager(
 
                 val asset = api.getSongAsset(track.id)
                 checkNotNull(asset) { "Failed to get song asset" }
-                val assetUrl = asset.jsonObject["URL"]?.jsonPrimitive?.content
+                val assetUrl = asset.getStringOrNull("URL")
                 checkNotNull(assetUrl) { "Failed to get song asset URL" }
                 val m3u8 = api.getText(assetUrl)
                 checkNotNull(m3u8) { "Failed to get m3u8" }
@@ -202,16 +202,16 @@ class DownloadManager(
                     metadata?.isrc?.let { tagger.setIsrc(it) }
                     metadata?.isCompilation?.takeIf { it }?.let { tagger.setCompilation() }
 
-                    val assetMetadata = asset.jsonObject["metadata"]?.jsonObject
-                    val sortName = assetMetadata?.get("sort-name")?.jsonPrimitive?.content
-                    val sortAlbum = assetMetadata?.get("sort-album")?.jsonPrimitive?.content
-                    val sortArtist = assetMetadata?.get("sort-artist")?.jsonPrimitive?.content
-                    val sortComposer = assetMetadata?.get("sort-composer")?.jsonPrimitive?.content
-                    val discNumber = assetMetadata?.get("discNumber")?.jsonPrimitive?.intOrNull
-                    val discCount = assetMetadata?.get("discCount")?.jsonPrimitive?.intOrNull
-                    val trackCount = assetMetadata?.get("trackCount")?.jsonPrimitive?.intOrNull
-                    val trackNumber = assetMetadata?.get("trackNumber")?.jsonPrimitive?.intOrNull
-                    val copyright = assetMetadata?.get("copyright")?.jsonPrimitive?.content
+                    val assetMetadata = asset.getObjectOrNull("metadata")
+                    val sortName = assetMetadata?.getStringOrNull("sort-name")
+                    val sortAlbum = assetMetadata?.getStringOrNull("sort-album")
+                    val sortArtist = assetMetadata?.getStringOrNull("sort-artist")
+                    val sortComposer = assetMetadata?.getStringOrNull("sort-composer")
+                    val discNumber = assetMetadata?.getIntOrNull("discNumber")
+                    val discCount = assetMetadata?.getIntOrNull("discCount")
+                    val trackCount = assetMetadata?.getIntOrNull("trackCount")
+                    val trackNumber = assetMetadata?.getIntOrNull("trackNumber")
+                    val copyright = assetMetadata?.getStringOrNull("copyright")
 
                     sortName?.let { tagger.setStringTag(M4aIdent.TitleSort, it) }
                     sortAlbum?.let { tagger.setStringTag(M4aIdent.AlbumSort, it) }
