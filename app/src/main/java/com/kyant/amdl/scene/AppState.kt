@@ -118,11 +118,20 @@ class AppState(private val context: Context) {
         }
     }
 
+    fun parseFromUrl(url: String) {
+        downloadManager.parseFromUrl(url, config)
+    }
+
     fun parseFromClipboard() {
-        val clipboardText = getClipboardText(context)
-        if (clipboardText != null) {
-            downloadManager.parseFromUrl(clipboardText, config)
-        }
+        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipboardText =
+            clipboardManager.primaryClip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(context)
+                ?.toString()
+                ?: return
+        parseFromUrl(clipboardText)
     }
 }
 
@@ -164,13 +173,4 @@ private fun getRealPathFromDocumentTreeUri(contentResolver: ContentResolver, uri
     } catch (_: Exception) {
     }
     return null
-}
-
-private fun getClipboardText(context: Context): String? {
-    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    return clipboardManager.primaryClip
-        ?.takeIf { it.itemCount > 0 }
-        ?.getItemAt(0)
-        ?.coerceToText(context)
-        ?.toString()
 }
