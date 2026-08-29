@@ -38,6 +38,7 @@ class DataStore(context: Context) {
     private val devToken = Value(stringPreferencesKey("dev_token"), "")
     private val mediaUserToken = Value(stringPreferencesKey("media_user_token"), "")
     private val language = Value(stringPreferencesKey("language"), "zh-Hans-CN")
+    private val preferAtmos = Value(booleanPreferencesKey("prefer_atmos"), false)
     private val downloadPath = Value(stringPreferencesKey("download_path"), "")
     private val saveByAlbum = Value(booleanPreferencesKey("save_by_album"), true)
     private val mergeSingles = Value(booleanPreferencesKey("merge_singles"), false)
@@ -53,6 +54,7 @@ class DataStore(context: Context) {
     val config: UserConfig by derivedStateOf {
         UserConfig(
             language = language.value,
+            preferAtmos = preferAtmos.value,
             downloadPath = downloadPath.value,
             saveByAlbum = saveByAlbum.value,
             mergeSingles = mergeSingles.value,
@@ -67,6 +69,10 @@ class DataStore(context: Context) {
 
     fun setLanguage(value: String) {
         language.value = value
+    }
+
+    fun setPreferAtmos(value: Boolean) {
+        preferAtmos.value = value
     }
 
     fun setDownloadPath(value: String) {

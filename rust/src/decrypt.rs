@@ -1,51 +1,73 @@
 use aes::Aes128;
-use bytes::Bytes;
-use ctr::Ctr128BE;
-use ctr::cipher::{KeyIvInit, StreamCipher};
+use ctr::cipher::{
+    Block, BlockModeDecrypt, InnerIvInit, KeyInit, StreamCipher, StreamCipherCoreWrapper,
+};
 use std::io;
 
-#[derive(Clone)]
+type Aes128CbcDec<'a> = cbc::Decryptor<&'a Aes128>;
+type Aes128CtrCore<'a> = ctr::CtrCore<&'a Aes128, ctr::flavors::Ctr128BE>;
+type Aes128Ctr<'a> = StreamCipherCoreWrapper<Aes128CtrCore<'a>>;
+
+const DEFAULT_SONG_DECRYPTION_KEY: [u8; 16] = [
+    0x32, 0xb8, 0xad, 0xe1, 0x76, 0x9e, 0x26, 0xb1, 0xff, 0xb8, 0x98, 0x63, 0x52, 0x79, 0x3f, 0xc6,
+];
+
 struct Sample {
-    data: Bytes,
+    offset: usize,
+    size: usize,
     duration: u32,
     desc_index: usize,
     iv: [u8; 16],
-    subsamples: Vec<(usize, usize)>,
+    subsample_start: usize,
+    subsample_count: usize,
     composition_time_offset: i32,
 }
 
-#[derive(Clone)]
 struct SongInfo {
     samples: Vec<Sample>,
+    subsamples: Vec<(usize, usize)>,
     moov_data: Vec<u8>,
+    encryption_info: Vec<Option<EncryptionInfo>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+struct EncryptionInfo {
+    scheme_type: [u8; 4],
+    crypt_byte_block: u8,
+    skip_byte_block: u8,
+    per_sample_iv_size: usize,
+    constant_iv: [u8; 16],
+}
+
+impl Default for EncryptionInfo {
+    fn default() -> Self {
+        Self {
+            scheme_type: *b"cbcs",
+            crypt_byte_block: 0,
+            skip_byte_block: 0,
+            per_sample_iv_size: 0,
+            constant_iv: [0; 16],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct BoxRec {
-    offset: u64,
-    size: u64,
+    offset: usize,
+    size: usize,
     typ: [u8; 4],
-    header_size: u64,
-    data: Bytes,
+    header_size: usize,
 }
 
-fn scan_top_level_boxes(input: &Bytes) -> io::Result<Vec<BoxRec>> {
+fn scan_top_level_boxes(input: &[u8]) -> io::Result<Vec<BoxRec>> {
     let mut boxes = Vec::new();
     let mut offset = 0usize;
-    while let Some((typ, box_offset, size, header_size)) =
-        next_box(input.as_ref(), offset, input.len())
-    {
-        let data = if matches!(&typ, b"moov" | b"moof") {
-            input.slice(box_offset..box_offset + size)
-        } else {
-            Bytes::new()
-        };
+    while let Some((typ, box_offset, size, header_size)) = next_box(input, offset, input.len()) {
         boxes.push(BoxRec {
-            offset: box_offset as u64,
-            size: size as u64,
+            offset: box_offset,
+            size,
             typ,
-            header_size: header_size as u64,
-            data,
+            header_size,
         });
         offset = box_offset + size;
     }
@@ -76,8 +98,7 @@ fn extract_track_id(moov: &[u8], handler_type: &[u8; 4], default: u32) -> u32 {
 }
 
 fn extract_trex_defaults(moov: &[u8], target_track_id: u32) -> (u32, usize) {
-    let is_alac = find_subslice(moov, b"alac").is_some();
-    let mut defaults = (if is_alac { 4096 } else { 1024 }, 0usize);
+    let mut defaults = (1024, 0usize);
     let Some(mvex) = find_child_box(moov, b"mvex", 8) else {
         return defaults;
     };
@@ -122,12 +143,9 @@ fn parse_tfhd(data: &[u8], info: &mut TfhdInfo) {
         info.default_size = be_u32(data, offset).unwrap_or(0) as usize;
         offset += 4;
     }
-    if flags & 0x20 != 0 && offset + 4 <= data.len() {
-        // default_sample_flags; irrelevant for audio output but still part of tfhd layout.
-    }
+    if flags & 0x20 != 0 && offset + 4 <= data.len() {}
 }
 
-#[derive(Clone)]
 struct TrunEntry {
     duration: Option<u32>,
     size: Option<usize>,
@@ -143,6 +161,7 @@ fn parse_trun(data: &[u8]) -> (Vec<TrunEntry>, Option<i32>) {
     let version = data[0];
     let flags = ((data[1] as u32) << 16) | ((data[2] as u32) << 8) | data[3] as u32;
     let sample_count = be_u32(data, 4).unwrap_or(0) as usize;
+    entries.reserve(sample_count);
     let mut offset = 8usize;
 
     let mut data_offset = None;
@@ -151,7 +170,6 @@ fn parse_trun(data: &[u8]) -> (Vec<TrunEntry>, Option<i32>) {
         offset += 4;
     }
     if flags & 0x04 != 0 && offset + 4 <= data.len() {
-        // first_sample_flags
         offset += 4;
     }
 
@@ -171,7 +189,6 @@ fn parse_trun(data: &[u8]) -> (Vec<TrunEntry>, Option<i32>) {
             offset += 4;
         }
         if flags & 0x400 != 0 && offset + 4 <= data.len() {
-            // sample_flags
             offset += 4;
         }
         if flags & 0x800 != 0 && offset + 4 <= data.len() {
@@ -189,9 +206,16 @@ fn parse_trun(data: &[u8]) -> (Vec<TrunEntry>, Option<i32>) {
     (entries, data_offset)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct SencEntry {
     iv: [u8; 16],
+    subsample_start: usize,
+    subsample_count: usize,
+}
+
+#[derive(Default)]
+struct SencInfo {
+    entries: Vec<SencEntry>,
     subsamples: Vec<(usize, usize)>,
 }
 
@@ -199,7 +223,7 @@ fn parse_senc_strict(
     data: &[u8],
     per_sample_iv_size: usize,
     sample_sizes: &[usize],
-) -> Option<Vec<SencEntry>> {
+) -> Option<SencInfo> {
     if data.len() < 8 {
         return None;
     }
@@ -208,8 +232,13 @@ fn parse_senc_strict(
     if sample_count > sample_sizes.len() {
         return None;
     }
+
     let mut offset = 8usize;
-    let mut entries = Vec::with_capacity(sample_count);
+    let mut info = SencInfo {
+        entries: Vec::with_capacity(sample_count),
+        subsamples: Vec::new(),
+    };
+
     for sample_index in 0..sample_count {
         let mut iv = [0u8; 16];
         if per_sample_iv_size > 0 {
@@ -220,47 +249,53 @@ fn parse_senc_strict(
                 .copy_from_slice(data.get(offset..offset + per_sample_iv_size)?);
             offset += per_sample_iv_size;
         }
-        let mut subsamples = Vec::new();
+
+        let subsample_start = info.subsamples.len();
+        let mut subsample_count = 0usize;
         if flags & 0x02 != 0 {
             let count = be_u16(data, offset)? as usize;
             offset += 2;
+            info.subsamples.reserve(count);
             let mut total = 0usize;
             for _ in 0..count {
                 let clear = be_u16(data, offset)? as usize;
-                let enc = be_u32(data, offset + 2)? as usize;
+                let encrypted = be_u32(data, offset + 2)? as usize;
                 offset += 6;
-                total = total.checked_add(clear)?.checked_add(enc)?;
+                total = total.checked_add(clear)?.checked_add(encrypted)?;
                 if total > sample_sizes[sample_index] {
                     return None;
                 }
-                subsamples.push((clear, enc));
+                info.subsamples.push((clear, encrypted));
             }
+            subsample_count = count;
         }
-        entries.push(SencEntry { iv, subsamples });
+
+        info.entries.push(SencEntry {
+            iv,
+            subsample_start,
+            subsample_count,
+        });
     }
-    Some(entries)
+    Some(info)
 }
 
 fn parse_senc_for_sample_sizes(
     data: &[u8],
     sample_sizes: &[usize],
     preferred_iv_size: usize,
-) -> Vec<SencEntry> {
-    let mut candidates = Vec::new();
-    for iv_size in [preferred_iv_size, 8, 16, 0] {
-        if !candidates.contains(&iv_size) {
-            candidates.push(iv_size);
+) -> SencInfo {
+    let candidates = [preferred_iv_size, 8, 16, 0];
+    for (index, &iv_size) in candidates.iter().enumerate() {
+        if candidates[..index].contains(&iv_size) {
+            continue;
+        }
+        if let Some(info) = parse_senc_strict(data, iv_size, sample_sizes) {
+            return info;
         }
     }
-    for iv_size in candidates {
-        if let Some(entries) = parse_senc_strict(data, iv_size, sample_sizes) {
-            return entries;
-        }
-    }
-    Vec::new()
+    SencInfo::default()
 }
 
-#[derive(Clone)]
 struct TfhdInfo {
     track_id: u32,
     desc_index: usize,
@@ -270,24 +305,27 @@ struct TfhdInfo {
 }
 
 fn parse_moof_mdat(
-    input: &Bytes,
+    input: &[u8],
     moof_data: &[u8],
     default_duration: u32,
     default_size: usize,
     track_id: u32,
-    moof_offset: u64,
-    mdat_data_offset: u64,
-    per_sample_iv_size: usize,
+    moof_offset: usize,
+    mdat_data_offset: usize,
+    encryption_info: &[Option<EncryptionInfo>],
+    default_encryption: EncryptionInfo,
     mdat_data_size: usize,
-) -> Vec<Sample> {
-    let mut samples = Vec::new();
+    samples: &mut Vec<Sample>,
+    subsamples: &mut Vec<(usize, usize)>,
+) {
     let mut offset = 8usize;
-    while let Some((typ, traf_offset, traf_size, _)) = next_box(moof_data, offset, moof_data.len())
-    {
+    let mut sample_sizes = Vec::new();
+    while let Some((typ, traf_offset, traf_size, _)) = next_box(moof_data, offset, moof_data.len()) {
         if &typ != b"traf" {
             offset = traf_offset + traf_size;
             continue;
         }
+
         let mut info = TfhdInfo {
             track_id: 0,
             desc_index: 0,
@@ -316,17 +354,35 @@ fn parse_moof_mdat(
             offset = traf_offset + traf_size;
             continue;
         }
-        let base = info.base_data_offset.unwrap_or(moof_offset);
+
+        let base = info.base_data_offset.unwrap_or(moof_offset as u64);
         let desc_index = info.desc_index.saturating_sub(1);
-        let sample_sizes: Vec<usize> = truns
-            .iter()
-            .flat_map(|(entries, _)| entries.iter().map(|e| e.size.unwrap_or(info.default_size)))
-            .collect();
-        let mut senc_entries = raw_senc
+        let per_sample_iv_size = encryption_info
+            .get(desc_index)
+            .and_then(Option::as_ref)
+            .copied()
+            .unwrap_or(default_encryption)
+            .per_sample_iv_size;
+
+        let total_entries: usize = truns.iter().map(|(entries, _)| entries.len()).sum();
+        samples.reserve(total_entries);
+        sample_sizes.clear();
+        sample_sizes.reserve(total_entries);
+        sample_sizes.extend(
+            truns
+                .iter()
+                .flat_map(|(entries, _)| entries.iter().map(|e| e.size.unwrap_or(info.default_size))),
+        );
+
+        let senc_info = raw_senc
             .map(|d| parse_senc_for_sample_sizes(d, &sample_sizes, per_sample_iv_size))
             .unwrap_or_default();
+        let senc_subsample_base = subsamples.len();
+        subsamples.extend_from_slice(&senc_info.subsamples);
+
         let mut mdat_pos: Option<i64> = None;
         let mut sample_index = 0usize;
+
         for (entries, trun_data_offset) in truns {
             if let Some(data_offset) = trun_data_offset {
                 mdat_pos = Some(base as i64 + data_offset as i64 - mdat_data_offset as i64);
@@ -334,6 +390,7 @@ fn parse_moof_mdat(
                 mdat_pos = Some(0);
             }
             let mut read_offset = mdat_pos.unwrap_or(0).max(0) as usize;
+
             for entry in entries {
                 let sample_size = entry.size.unwrap_or(info.default_size);
                 let duration = entry.duration.unwrap_or(info.default_duration);
@@ -341,16 +398,19 @@ fn parse_moof_mdat(
                     sample_index += 1;
                     continue;
                 };
+
                 if sample_size > 0 && sample_end <= mdat_data_size {
-                    let (iv, subsamples) = if let Some(senc) = senc_entries.get_mut(sample_index) {
-                        (senc.iv, std::mem::take(&mut senc.subsamples))
-                    } else {
-                        ([0u8; 16], Vec::new())
-                    };
-                    let Some(absolute_start) = usize::try_from(mdat_data_offset)
-                        .ok()
-                        .and_then(|base| base.checked_add(read_offset))
-                    else {
+                    let (iv, subsample_start, subsample_count) =
+                        if let Some(senc) = senc_info.entries.get(sample_index) {
+                            (
+                                senc.iv,
+                                senc_subsample_base + senc.subsample_start,
+                                senc.subsample_count,
+                            )
+                        } else {
+                            ([0u8; 16], subsamples.len(), 0)
+                        };
+                    let Some(absolute_start) = mdat_data_offset.checked_add(read_offset) else {
                         sample_index += 1;
                         continue;
                     };
@@ -362,12 +422,15 @@ fn parse_moof_mdat(
                         sample_index += 1;
                         continue;
                     }
+
                     samples.push(Sample {
-                        data: input.slice(absolute_start..absolute_end),
+                        offset: absolute_start,
+                        size: sample_size,
                         duration,
                         desc_index,
                         iv,
-                        subsamples,
+                        subsample_start,
+                        subsample_count,
                         composition_time_offset: entry.composition_time_offset,
                     });
                     read_offset = sample_end;
@@ -378,70 +441,92 @@ fn parse_moof_mdat(
         }
         offset = traf_offset + traf_size;
     }
-    samples
 }
 
-fn extract_per_sample_iv_size_from_entry(entry: &[u8]) -> Option<usize> {
+fn extract_encryption_info_from_entry(entry: &[u8]) -> Option<EncryptionInfo> {
     if entry.len() < 16 {
         return None;
     }
+
     let header_size = sample_entry_header_size(&entry[4..8]);
     let sinf = find_child_box(entry, b"sinf", header_size)?;
+    let mut info = EncryptionInfo::default();
+
+    if let Some(schm) = find_child_box(sinf, b"schm", 8) {
+        if let Some(scheme) = schm.get(12..16) {
+            info.scheme_type.copy_from_slice(scheme);
+        }
+    }
+
     let schi = find_child_box(sinf, b"schi", 8)?;
     let tenc = find_child_box(schi, b"tenc", 8)?;
     if tenc.len() < 32 {
-        return None;
+        return Some(info);
     }
-    Some(tenc[15] as usize)
+
+    if tenc[8] > 0 {
+        info.crypt_byte_block = tenc[13] >> 4;
+        info.skip_byte_block = tenc[13] & 0x0f;
+    }
+    info.per_sample_iv_size = tenc[15] as usize;
+
+    if info.per_sample_iv_size == 0 && tenc.len() > 32 {
+        let iv_size = tenc[32] as usize;
+        if iv_size <= 16 && 33 + iv_size <= tenc.len() {
+            info.constant_iv[..iv_size].copy_from_slice(&tenc[33..33 + iv_size]);
+        }
+    }
+
+    Some(info)
 }
 
-fn extract_per_sample_iv_size(moov: &[u8]) -> usize {
+fn extract_encryption_info_per_stsd(moov: &[u8]) -> Vec<Option<EncryptionInfo>> {
     let Some(trak) = find_track_by_handler(moov, b"soun") else {
-        return 0;
+        return Vec::new();
     };
     let Some(mdia) = find_child_box(trak, b"mdia", 8) else {
-        return 0;
+        return Vec::new();
     };
     let Some(minf) = find_child_box(mdia, b"minf", 8) else {
-        return 0;
+        return Vec::new();
     };
     let Some(stbl) = find_child_box(minf, b"stbl", 8) else {
-        return 0;
+        return Vec::new();
     };
     let Some(stsd) = find_child_box(stbl, b"stsd", 8) else {
-        return 0;
+        return Vec::new();
     };
     if stsd.len() < 16 {
-        return 0;
+        return Vec::new();
     }
 
-    let entry_count = be_u32(&stsd, 12).unwrap_or(0) as usize;
+    let entry_count = be_u32(stsd, 12).unwrap_or(0) as usize;
+    let mut out = Vec::with_capacity(entry_count);
     let mut offset = 16usize;
+
     for _ in 0..entry_count {
-        let Some(entry_size) = be_u32(&stsd, offset).map(|v| v as usize) else {
+        let Some(entry_size) = be_u32(stsd, offset).map(|v| v as usize) else {
             break;
         };
         if entry_size < 8 || offset + entry_size > stsd.len() {
             break;
         }
-        if let Some(iv_size) =
-            extract_per_sample_iv_size_from_entry(&stsd[offset..offset + entry_size])
-        {
-            return iv_size;
-        }
+        out.push(extract_encryption_info_from_entry(
+            &stsd[offset..offset + entry_size],
+        ));
         offset += entry_size;
     }
 
-    0
+    out
 }
 
-fn extract_song(input: &Bytes) -> io::Result<SongInfo> {
+fn extract_song(input: &[u8]) -> io::Result<SongInfo> {
     let boxes = scan_top_level_boxes(input)?;
-    let moov_data = boxes
+    let moov_box = boxes
         .iter()
         .find(|b| &b.typ == b"moov")
-        .map(|b| b.data.to_vec())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "decrypt: moov box not found"))?;
+    let moov_data = input[moov_box.offset..moov_box.offset + moov_box.size].to_vec();
 
     let track_id = extract_track_id(&moov_data, b"soun", 0);
     if track_id == 0 {
@@ -452,36 +537,38 @@ fn extract_song(input: &Bytes) -> io::Result<SongInfo> {
     }
 
     let (default_duration, default_size) = extract_trex_defaults(&moov_data, track_id);
-    let iv_size = extract_per_sample_iv_size(&moov_data);
+    let encryption_info = extract_encryption_info_per_stsd(&moov_data);
+    let default_encryption = encryption_info
+        .iter()
+        .flatten()
+        .copied()
+        .next()
+        .unwrap_or_default();
 
     let mut samples = Vec::new();
+    let mut subsamples = Vec::new();
     let mut pending_moof: Option<&BoxRec> = None;
     for b in &boxes {
         if &b.typ == b"moof" {
             pending_moof = Some(b);
         } else if &b.typ == b"mdat" {
             if let Some(moof) = pending_moof.take() {
-                let mdat_size = (b.size - b.header_size) as usize;
-                samples.extend(parse_moof_mdat(
+                let mdat_size = b.size - b.header_size;
+                let moof_data = &input[moof.offset..moof.offset + moof.size];
+                parse_moof_mdat(
                     input,
-                    &moof.data,
+                    moof_data,
                     default_duration,
                     default_size,
                     track_id,
                     moof.offset,
                     b.offset + b.header_size,
-                    iv_size,
+                    &encryption_info,
+                    default_encryption,
                     mdat_size,
-                ));
-            }
-        }
-    }
-
-    if find_subslice(&moov_data, b"alac").is_some() || find_subslice(&moov_data, b"ALAC").is_some()
-    {
-        for sample in &mut samples {
-            if sample.duration == 0 || sample.duration == 1024 {
-                sample.duration = 4096;
+                    &mut samples,
+                    &mut subsamples,
+                );
             }
         }
     }
@@ -493,16 +580,30 @@ fn extract_song(input: &Bytes) -> io::Result<SongInfo> {
         ));
     }
 
-    Ok(SongInfo { samples, moov_data })
+    Ok(SongInfo {
+        samples,
+        subsamples,
+        moov_data,
+        encryption_info,
+    })
+}
+
+fn ctr_from_aes<'a>(aes: &'a Aes128, iv: &[u8; 16]) -> Aes128Ctr<'a> {
+    let core = <Aes128CtrCore<'a>>::inner_iv_init(aes, &(*iv).into());
+    Aes128Ctr::from_core(core)
+}
+
+fn cbc_from_aes<'a>(aes: &'a Aes128, iv: &[u8; 16]) -> Aes128CbcDec<'a> {
+    <Aes128CbcDec<'a>>::inner_iv_init(aes, &(*iv).into())
 }
 
 fn decrypt_cenc_in_place(
     data: &mut [u8],
-    key: &[u8; 16],
+    aes: &Aes128,
     iv: &[u8; 16],
     subsamples: &[(usize, usize)],
 ) -> io::Result<()> {
-    let mut cipher = Ctr128BE::<Aes128>::new(key.into(), iv.into());
+    let mut cipher = ctr_from_aes(aes, iv);
 
     if subsamples.is_empty() {
         cipher.apply_keystream(data);
@@ -536,58 +637,311 @@ fn decrypt_cenc_in_place(
     Ok(())
 }
 
-pub fn decrypt_m4a(key: &[u8; 16], data: Vec<u8>) -> io::Result<Vec<u8>> {
-    let data = Bytes::from(data);
-    let SongInfo {
-        mut samples,
-        moov_data,
-    } = extract_song(&data)?;
-    drop(data);
+fn decrypt_cbc_aligned_prefix_in_place(
+    data: &mut [u8],
+    aes: &Aes128,
+    iv: &[u8; 16],
+) -> io::Result<()> {
+    let aligned_len = data.len() & !0x0f;
+    if aligned_len == 0 {
+        return Ok(());
+    }
 
-    let sample_info: Vec<SampleInfo> = samples
+    let (blocks, remainder) =
+        Block::<Aes128>::slice_as_chunks_mut(&mut data[..aligned_len]);
+    debug_assert!(remainder.is_empty());
+    let mut decryptor = cbc_from_aes(aes, iv);
+    decryptor.decrypt_blocks(blocks);
+    Ok(())
+}
+
+fn decrypt_cbcs_pattern_in_place(
+    data: &mut [u8],
+    aes: &Aes128,
+    iv: &[u8; 16],
+    crypt_blocks: u8,
+    skip_blocks: u8,
+) -> io::Result<()> {
+    if crypt_blocks == 0 {
+        return Ok(());
+    }
+
+    let crypt_bytes = crypt_blocks as usize * 16;
+    let skip_bytes = skip_blocks as usize * 16;
+    let mut decryptor = cbc_from_aes(aes, iv);
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let crypt_window = crypt_bytes.min(data.len() - offset);
+        let aligned_len = crypt_window & !0x0f;
+
+        if aligned_len > 0 {
+            let end = offset + aligned_len;
+            let (blocks, remainder) =
+                Block::<Aes128>::slice_as_chunks_mut(&mut data[offset..end]);
+            debug_assert!(remainder.is_empty());
+            decryptor.decrypt_blocks(blocks);
+            offset = end;
+        }
+
+        offset += crypt_window - aligned_len;
+        offset += skip_bytes.min(data.len() - offset);
+    }
+
+    Ok(())
+}
+
+fn decrypt_cbcs_in_place(
+    data: &mut [u8],
+    aes: &Aes128,
+    iv: &[u8; 16],
+    subsamples: &[(usize, usize)],
+    crypt_blocks: u8,
+    skip_blocks: u8,
+    scratch: &mut Vec<u8>,
+) -> io::Result<()> {
+    if crypt_blocks > 0 && skip_blocks > 0 {
+        if subsamples.is_empty() {
+            return decrypt_cbcs_pattern_in_place(data, aes, iv, crypt_blocks, skip_blocks);
+        }
+
+        let mut offset = 0usize;
+        for &(clear, encrypted) in subsamples {
+            offset = offset.checked_add(clear).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "decrypt: subsample offset overflow")
+            })?;
+            let end = offset.checked_add(encrypted).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "decrypt: subsample size overflow")
+            })?;
+            if end > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decrypt: subsample range exceeds sample size",
+                ));
+            }
+
+            decrypt_cbcs_pattern_in_place(
+                &mut data[offset..end],
+                aes,
+                iv,
+                crypt_blocks,
+                skip_blocks,
+            )?;
+            offset = end;
+        }
+        return Ok(());
+    }
+
+    if subsamples.is_empty() {
+        return decrypt_cbc_aligned_prefix_in_place(data, aes, iv);
+    }
+
+    let encrypted_len = subsamples.iter().try_fold(0usize, |total, &(_, encrypted)| {
+        total.checked_add(encrypted).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decrypt: encrypted subsample size overflow",
+            )
+        })
+    })?;
+    if encrypted_len == 0 {
+        return Ok(());
+    }
+
+
+    scratch.clear();
+    scratch.reserve(encrypted_len);
+    let mut offset = 0usize;
+    for &(clear, encrypted_size) in subsamples {
+        offset = offset.checked_add(clear).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "decrypt: subsample offset overflow")
+        })?;
+        let end = offset.checked_add(encrypted_size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "decrypt: subsample size overflow")
+        })?;
+        if end > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decrypt: subsample range exceeds sample size",
+            ));
+        }
+        scratch.extend_from_slice(&data[offset..end]);
+        offset = end;
+    }
+
+    decrypt_cbc_aligned_prefix_in_place(scratch.as_mut_slice(), aes, iv)?;
+
+    let mut source_offset = 0usize;
+    let mut sample_offset = 0usize;
+    for &(clear, encrypted_size) in subsamples {
+        sample_offset += clear;
+        let sample_end = sample_offset + encrypted_size;
+        let source_end = source_offset + encrypted_size;
+        data[sample_offset..sample_end].copy_from_slice(&scratch[source_offset..source_end]);
+        sample_offset = sample_end;
+        source_offset = source_end;
+    }
+
+    Ok(())
+}
+
+fn decrypt_sample_in_place(
+    data: &mut [u8],
+    aes: &Aes128,
+    sample: &Sample,
+    subsamples: &[(usize, usize)],
+    encryption: EncryptionInfo,
+    scratch: &mut Vec<u8>,
+) -> io::Result<()> {
+    if &encryption.scheme_type == b"cenc" {
+        return decrypt_cenc_in_place(data, aes, &sample.iv, subsamples);
+    }
+
+    let iv = if encryption.per_sample_iv_size == 0 {
+        &encryption.constant_iv
+    } else {
+        &sample.iv
+    };
+    decrypt_cbcs_in_place(
+        data,
+        aes,
+        iv,
+        subsamples,
+        encryption.crypt_byte_block,
+        encryption.skip_byte_block,
+        scratch,
+    )
+}
+
+fn append_sample_payloads(output: &mut Vec<u8>, input: &[u8], samples: &[Sample]) -> io::Result<()> {
+    let mut index = 0usize;
+    while index < samples.len() {
+        let first = &samples[index];
+        let run_start = first.offset;
+        let mut run_end = first.offset.checked_add(first.size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "decrypt: sample range overflow")
+        })?;
+        if run_end > input.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decrypt: sample range exceeds input",
+            ));
+        }
+
+        let mut next = index + 1;
+        while next < samples.len() && samples[next].offset == run_end {
+            run_end = run_end.checked_add(samples[next].size).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "decrypt: sample range overflow")
+            })?;
+            if run_end > input.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decrypt: sample range exceeds input",
+                ));
+            }
+            next += 1;
+        }
+
+        output.extend_from_slice(&input[run_start..run_end]);
+        index = next;
+    }
+    Ok(())
+}
+
+pub fn decrypt_m4a(key: &[u8; 16], data: Vec<u8>) -> io::Result<Vec<u8>> {
+    let SongInfo {
+        samples,
+        subsamples,
+        moov_data,
+        encryption_info,
+    } = extract_song(&data)?;
+
+    let default_encryption = encryption_info
         .iter()
-        .map(|sample| SampleInfo {
-            size: sample.data.len() as u64,
+        .flatten()
+        .copied()
+        .next()
+        .unwrap_or_default();
+
+    let mut sample_info = Vec::with_capacity(samples.len());
+    let mut payload_size = 0usize;
+    for sample in &samples {
+        payload_size = payload_size.checked_add(sample.size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "mux: payload size overflow")
+        })?;
+        sample_info.push(SampleInfo {
+            size: sample.size as u64,
             duration: sample.duration,
             desc_index: sample.desc_index,
             composition_time_offset: sample.composition_time_offset,
-        })
-        .collect();
+        });
+    }
 
     let track = TrackInfo {
         samples: sample_info,
         moov_data,
     };
 
-    let payload_size = samples.iter().try_fold(0usize, |total, sample| {
-        total
-            .checked_add(sample.data.len())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "mux: payload size overflow"))
-    })?;
+
+    let song_aes = Aes128::new(&DEFAULT_SONG_DECRYPTION_KEY.into());
+    let track_aes = Aes128::new(&(*key).into());
 
     let mut output = build_m4a_prefix(&track, payload_size)?;
+    let payload_start = output.len();
 
-    for sample in &mut samples {
-        let start = output.len();
-        output.extend_from_slice(sample.data.as_ref());
-        let end = output.len();
 
-        decrypt_cenc_in_place(
-            &mut output[start..end],
-            &key,
-            &sample.iv,
-            &sample.subsamples,
-        )?;
+    append_sample_payloads(&mut output, &data, &samples)?;
+    debug_assert_eq!(output.len(), payload_start + payload_size);
 
-        // Drop slices/metadata early so the input allocation is no longer retained by this sample.
-        sample.data = Bytes::new();
-        sample.subsamples.clear();
+    let mut decrypt_scratch = Vec::new();
+    let mut output_offset = payload_start;
+    for sample in &samples {
+        let end = output_offset.checked_add(sample.size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "decrypt: output range overflow")
+        })?;
+
+
+        let sample_aes = match sample.desc_index {
+            0 => Some(&song_aes),
+            1 => Some(&track_aes),
+            _ => None,
+        };
+
+        if let Some(sample_aes) = sample_aes {
+            let subsample_end = sample
+                .subsample_start
+                .checked_add(sample.subsample_count)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "decrypt: subsample range overflow")
+                })?;
+            if subsample_end > subsamples.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decrypt: subsample range exceeds table",
+                ));
+            }
+            let sample_subsamples = &subsamples[sample.subsample_start..subsample_end];
+
+            let encryption = encryption_info
+                .get(sample.desc_index)
+                .and_then(Option::as_ref)
+                .copied()
+                .unwrap_or(default_encryption);
+            decrypt_sample_in_place(
+                &mut output[output_offset..end],
+                sample_aes,
+                sample,
+                sample_subsamples,
+                encryption,
+                &mut decrypt_scratch,
+            )?;
+        }
+        output_offset = end;
     }
 
     Ok(output)
 }
 
-#[derive(Clone)]
 struct SampleInfo {
     size: u64,
     duration: u32,
@@ -595,7 +949,6 @@ struct SampleInfo {
     composition_time_offset: i32,
 }
 
-#[derive(Clone)]
 struct TrackInfo {
     samples: Vec<SampleInfo>,
     moov_data: Vec<u8>,
@@ -773,10 +1126,6 @@ fn find_track_by_handler<'a>(moov_data: &'a [u8], handler_type: &[u8; 4]) -> Opt
     None
 }
 
-fn find_first_trak(moov_data: &[u8]) -> Option<&[u8]> {
-    find_child_box(moov_data, b"trak", 8)
-}
-
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -819,7 +1168,7 @@ fn extract_track_timescale(moov: &[u8], default: u32) -> u32 {
 
 fn sample_entry_header_size(entry_type: &[u8]) -> usize {
     match entry_type {
-        b"enca" | b"mp4a" | b"alac" | b"ac-3" | b"ec-3" => 36,
+        b"enca" | b"mp4a" | b"ac-3" | b"ec-3" => 36,
         _ => 36,
     }
 }
@@ -1010,12 +1359,12 @@ fn patch_mdhd_duration(data: &[u8], duration: u64, timescale: u32) -> Vec<u8> {
     out
 }
 
-fn patch_first_chunk_offset(trak: &[u8], chunk_offset: u64) -> io::Result<Vec<u8>> {
-    let mut out = trak.to_vec();
-    if let Some(stco_offset) = find_box_offset_recursive(&out, b"stco") {
+fn patch_first_chunk_offset_in_place(trak: &mut [u8], chunk_offset: u64) -> io::Result<()> {
+    if let Some(stco_offset) = find_box_offset_recursive(trak, b"stco") {
         let entry_count_offset = stco_offset + 12;
         let first_entry_offset = stco_offset + 16;
-        if first_entry_offset + 4 <= out.len() && be_u32(&out, entry_count_offset).unwrap_or(0) > 0
+        if first_entry_offset + 4 <= trak.len()
+            && be_u32(trak, entry_count_offset).unwrap_or(0) > 0
         {
             if chunk_offset > u32::MAX as u64 {
                 return Err(io::Error::new(
@@ -1023,17 +1372,18 @@ fn patch_first_chunk_offset(trak: &[u8], chunk_offset: u64) -> io::Result<Vec<u8
                     "mux: chunk offset too large for stco",
                 ));
             }
-            patch_u32(&mut out, first_entry_offset, chunk_offset as u32);
-            return Ok(out);
+            patch_u32(trak, first_entry_offset, chunk_offset as u32);
+            return Ok(());
         }
     }
-    if let Some(co64_offset) = find_box_offset_recursive(&out, b"co64") {
+    if let Some(co64_offset) = find_box_offset_recursive(trak, b"co64") {
         let entry_count_offset = co64_offset + 12;
         let first_entry_offset = co64_offset + 16;
-        if first_entry_offset + 8 <= out.len() && be_u32(&out, entry_count_offset).unwrap_or(0) > 0
+        if first_entry_offset + 8 <= trak.len()
+            && be_u32(trak, entry_count_offset).unwrap_or(0) > 0
         {
-            patch_u64(&mut out, first_entry_offset, chunk_offset);
-            return Ok(out);
+            patch_u64(trak, first_entry_offset, chunk_offset);
+            return Ok(());
         }
     }
     Err(io::Error::new(
@@ -1043,37 +1393,13 @@ fn patch_first_chunk_offset(trak: &[u8], chunk_offset: u64) -> io::Result<Vec<u8
 }
 
 fn write_stsd(out: &mut Vec<u8>, stsd_content: Option<&[u8]>) -> io::Result<()> {
-    if let Some(content) = stsd_content.filter(|c| !c.is_empty()) {
-        push_box(out, b"stsd", content)
-    } else {
-        write_stsd_alac_fallback(out)
-    }
-}
-
-fn write_stsd_alac_fallback(out: &mut Vec<u8>) -> io::Result<()> {
-    let mut alac = Vec::new();
-    alac.extend_from_slice(&[0; 6]);
-    put_u16(&mut alac, 1);
-    alac.extend_from_slice(&[0; 8]);
-    put_u16(&mut alac, 2);
-    put_u16(&mut alac, 16);
-    put_u16(&mut alac, 0);
-    put_u16(&mut alac, 0);
-    put_u32(&mut alac, 44100 << 16);
-    push_box(
-        &mut alac,
-        b"alac",
-        &[
-            0x00, 0x00, 0x10, 0x00, 0x00, 0x18, 0x28, 0x28, 0x0A, 0x02, 0x00, 0x00, 0x00, 0x00,
-            0xFF, 0xFF, 0x00, 0x0D, 0x00, 0x80, 0x00, 0x00, 0xAC, 0x44,
-        ],
-    )?;
-    let alac_box = wrap_box(b"alac", alac)?;
-    let mut stsd = Vec::new();
-    put_u32(&mut stsd, 0);
-    put_u32(&mut stsd, 1);
-    stsd.extend_from_slice(&alac_box);
-    push_box(out, b"stsd", &stsd)
+    let content = stsd_content.filter(|content| !content.is_empty()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mux: source audio sample description is missing",
+        )
+    })?;
+    push_box(out, b"stsd", content)
 }
 
 fn write_stts(out: &mut Vec<u8>, samples: &[SampleInfo]) -> io::Result<()> {
@@ -1338,7 +1664,7 @@ fn build_m4a_prefix(track: &TrackInfo, payload_size: usize) -> io::Result<Vec<u8
     let ftyp = ftyp_m4a()?;
     let mut moov = build_decrypted_track_moov(track)?;
     let mdat_data_offset = ftyp.len() as u64 + moov.len() as u64 + 8;
-    moov = patch_moov_first_trak_chunk_offset(&moov, mdat_data_offset)?;
+    patch_moov_first_trak_chunk_offset_in_place(&mut moov, mdat_data_offset)?;
 
     let capacity = ftyp
         .len()
@@ -1355,35 +1681,23 @@ fn build_m4a_prefix(track: &TrackInfo, payload_size: usize) -> io::Result<Vec<u8
     Ok(out)
 }
 
-fn patch_moov_first_trak_chunk_offset(moov: &[u8], offset: u64) -> io::Result<Vec<u8>> {
-    let Some(trak) = find_first_trak(moov) else {
-        return Ok(moov.to_vec());
-    };
-    let patched_trak = patch_first_chunk_offset(&trak, offset)?;
-    replace_first_child_box(moov, b"trak", &patched_trak)
-}
-
-fn replace_first_child_box(
-    container: &[u8],
-    typ: &[u8; 4],
-    replacement: &[u8],
-) -> io::Result<Vec<u8>> {
-    let mut offset = 8usize;
-    while let Some((child_type, box_offset, size, _)) = next_box(container, offset, container.len())
-    {
-        if &child_type == typ {
-            let mut out = Vec::with_capacity(container.len() - size + replacement.len());
-            out.extend_from_slice(&container[..box_offset]);
-            out.extend_from_slice(replacement);
-            out.extend_from_slice(&container[box_offset + size..]);
-            let out_len = out.len() as u32;
-            patch_u32(&mut out, 0, out_len);
-            return Ok(out);
+fn patch_moov_first_trak_chunk_offset_in_place(
+    moov: &mut [u8],
+    offset: u64,
+) -> io::Result<()> {
+    let mut child_offset = 8usize;
+    while let Some((typ, box_offset, size, _)) = next_box(moov, child_offset, moov.len()) {
+        if &typ == b"trak" {
+            return patch_first_chunk_offset_in_place(
+                &mut moov[box_offset..box_offset + size],
+                offset,
+            );
         }
-        offset = box_offset + size;
+        child_offset = box_offset + size;
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        "mux: child box not found",
+        "mux: trak box not found",
     ))
 }
+

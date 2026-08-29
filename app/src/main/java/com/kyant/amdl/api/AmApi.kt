@@ -1,12 +1,16 @@
 package com.kyant.amdl.api
 
 import androidx.core.net.toUri
+import com.kyant.amdl.engine.Cdm
+import com.kyant.amdl.engine.RustLib
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.io.encoding.Base64
+import kotlin.io.readBytes
+import kotlin.use
 
 data class AmApi(
     private val tokens: AmTokens,
@@ -58,20 +62,32 @@ data class AmApi(
         }
     }
 
-    suspend fun getTrackMetadata(track: Track): TrackMetadata? {
-        val url =
-            "https://amp-api.music.apple.com/v1/catalog/${track.storefront}/songs/${track.id}?l=$language&include=albums,lyrics,syllable-lyrics&extend=ttmlLocalizations"
-        val json =
-            httpGet(url) { JsonObject(readBytes().decodeToString()) }
+    suspend fun getTrackMetadata(track: Track): TrackMetadata {
+        val songData =
+            httpGet("https://amp-api.music.apple.com/v1/catalog/${track.storefront}/songs/${track.id}?l=$language&include=albums,lyrics,syllable-lyrics&extend=ttmlLocalizations") {
+                JsonObject(readBytes().decodeToString())
+            }
                 ?.getArrayOrNull("data")?.getObjectOrNull(0)
-                ?: return null
 
-        val attr = json.getObjectOrNull("attributes")
-        val relationships = json.getObjectOrNull("relationships")
+        val attr = songData?.getObjectOrNull("attributes")
+        val relationships = songData?.getObjectOrNull("relationships")
         val albumAttr =
             relationships?.getObjectOrNull("albums")
                 ?.getArrayOrNull("data")?.getObjectOrNull(0)
                 ?.getObjectOrNull("attributes")
+
+        val webMetadata =
+            httpPost(
+                "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback?l=$language",
+                buildJsonObject {
+                    put("salableAdamId", track.id)
+                }.toString()
+            ) { JsonObject(readBytes().decodeToString()) }
+                ?.getArrayOrNull("songList")?.getObjectOrNull(0)
+                ?.getArrayOrNull("assets")?.asSequence<JsonObject>()
+                ?.firstOrNull()
+                ?.getObjectOrNull("metadata")
+
         return TrackMetadata(
             name = attr?.getStringOrNull("name"),
             artistName = attr?.getStringOrNull("artistName"),
@@ -79,11 +95,21 @@ data class AmApi(
             albumArtistName = attr?.getStringOrNull("albumArtistName"),
             composerName = attr?.getStringOrNull("composerName"),
             genreNames = attr?.getArrayOrNull("genreNames")?.asSequence<String>()?.toList(),
+            sortName = webMetadata?.getStringOrNull("sort-name"),
+            sortAlbum = webMetadata?.getStringOrNull("sort-album"),
+            sortArtist = webMetadata?.getStringOrNull("sort-artist"),
+            sortAlbumArtist = null,
+            sortComposer = webMetadata?.getStringOrNull("sort-composer"),
             releaseDate = attr?.getStringOrNull("releaseDate"),
+            discNumber = webMetadata?.getIntOrNull("discNumber"),
+            discCount = webMetadata?.getIntOrNull("discCount"),
+            trackNumber = webMetadata?.getIntOrNull("trackNumber"),
+            trackCount = webMetadata?.getIntOrNull("trackCount"),
+            isrc = attr?.getStringOrNull("isrc"),
+            copyright = webMetadata?.getStringOrNull("copyright"),
             albumReleaseDate = albumAttr?.getStringOrNull("releaseDate"),
             isSingle = albumAttr?.getBooleanOrNull("isSingle"),
             isCompilation = albumAttr?.getBooleanOrNull("isCompilation"),
-            isrc = attr?.getStringOrNull("isrc"),
             lyrics =
                 relationships?.getObjectOrNull("lyrics")
                     ?.getArrayOrNull("data")?.getObjectOrNull(0)
@@ -97,31 +123,74 @@ data class AmApi(
         )
     }
 
-    suspend fun getSongAsset(id: String): JsonObject? {
-        val url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback?l=$language"
-        val body =
-            buildJsonObject {
-                put("salableAdamId", id)
-            }.toString()
-        return httpPost(url, body) { JsonObject(readBytes().decodeToString()) }
-            ?.getArrayOrNull("songList")?.getObjectOrNull(0)
-            ?.getArrayOrNull("assets")?.asSequence<JsonObject>()
-            ?.find { it.getStringOrNull("flavor") == "28:ctrp256" }
-    }
-
-    suspend fun getLicense(challenge: ByteArray, uri: String, adamId: String): ByteArray? {
-        val url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
-        val body =
-            buildJsonObject {
-                put("challenge", Base64.encode(challenge))
-                put("key-system", "com.widevine.alpha")
-                put("uri", uri)
-                put("adamId", adamId)
-                put("user-initiated", true)
-            }.toString()
-        return httpPost(url, body) { JsonObject(readBytes().decodeToString()) }
-            ?.getStringOrNull("license")
-            ?.let { Base64.decode(it) }
+    suspend fun getM4a(id: String, cdm: Cdm, atmos: Boolean): ByteArray {
+        val assetUrl =
+            httpGet("https://amp-api.music.apple.com/v1/play/assets?id=$id&kind=song&includeLicenseUrls=true&hlsEncryption=CBC&hlsProfile=enhancedHls") {
+                JsonObject(readBytes().decodeToString())
+            }
+                ?.getObjectOrNull("results")
+                ?.getArrayOrNull("assets")?.getObjectOrNull(0)
+                ?.getStringOrNull("url")
+                ?.replace("(P\\d+)_([^/]+)(\\.m3u8)".toRegex(), "$1_default$3")
+        checkNotNull(assetUrl) { "Failed to get asset URL" }
+        val assetM3u8 = getText(assetUrl)
+        checkNotNull(assetM3u8) { "Failed to download asset M3U8" }
+        val streamHrefLineIndex = run {
+            var index = -1
+            if (atmos) {
+                index = assetM3u8.lineSequence().indexOfFirst { it.contains("AUDIO=\"audio-atmos-") }
+            }
+            if (index == -1) {
+                index = assetM3u8.lineSequence().indexOfFirst { it.endsWith("AUDIO=\"audio-stereo-256\"") }
+            }
+            if (index == -1) {
+                index = assetM3u8.lineSequence().indexOfFirst { it.contains("AUDIO=\"") }
+            }
+            check(index != -1) { "Failed to find audio stream in asset M3U8" }
+            index + 1
+        }
+        val streamHref = assetM3u8.lineSequence().elementAtOrNull(streamHrefLineIndex)
+        checkNotNull(streamHref) { "Failed to find audio stream href in asset M3U8" }
+        val m3u8Url = assetUrl.substringBeforeLast('/') + '/' + streamHref
+        val m3u8 = getText(m3u8Url)
+        checkNotNull(m3u8) { "Failed to download M3U8" }
+        val contentUri =
+            m3u8.lineSequence()
+                .firstOrNull {
+                    it.contains("KEYFORMAT=\"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed\"") &&
+                            !it.contains("URI=\"data:text/plain;base64,AAAAOHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAABgSEAAAAAAAAAAAczEvZTEgICBI88aJmwY=\"")
+                }
+                ?.substringAfter("URI=\"")
+                ?.substringBefore("\"")
+        checkNotNull(contentUri) { "Failed to find content key URI" }
+        val pssh =
+            try {
+                Base64.decode(contentUri.substringAfter(','))
+            } catch (e: Exception) {
+                throw IllegalArgumentException("Failed to decode content key URI", e)
+            }
+        val contentKey =
+            cdm.createLicenseRequest(pssh).use { licenseRequest ->
+                val challenge = licenseRequest.getChallenge()
+                checkNotNull(challenge) { "Failed to get challenge" }
+                val licenseResponse = getLicense(challenge, contentUri, id)
+                checkNotNull(licenseResponse) { "Failed to get license response" }
+                val contentKey = licenseRequest.getContentKey(licenseResponse)
+                checkNotNull(contentKey) { "Failed to get content key" }
+                contentKey
+            }
+        val songHref =
+            m3u8.lineSequence()
+                .firstOrNull { it.startsWith("#EXT-X-MAP:URI=\"") }
+                ?.substringAfter("#EXT-X-MAP:URI=\"")
+                ?.substringBefore("\"")
+        checkNotNull(songHref) { "Failed to find song href in M3U8" }
+        val songUrl = assetUrl.substringBeforeLast('/') + '/' + songHref
+        val encryptedData = getBytes(songUrl)
+        checkNotNull(encryptedData) { "Failed to download M4A" }
+        val decryptedData = RustLib.decryptM4a(contentKey, encryptedData)
+        checkNotNull(decryptedData) { "Failed to decrypt M4A" }
+        return decryptedData
     }
 
     private suspend fun getTracksFromSong(storefront: String, id: String): List<Track> {
@@ -171,6 +240,21 @@ data class AmApi(
             }
             ?.toList()
             .orEmpty()
+    }
+
+    private suspend fun getLicense(challenge: ByteArray, uri: String, adamId: String): ByteArray? {
+        return httpPost(
+            "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
+            buildJsonObject {
+                put("challenge", Base64.encode(challenge))
+                put("key-system", "com.widevine.alpha")
+                put("uri", uri)
+                put("adamId", adamId)
+                put("user-initiated", true)
+            }.toString()
+        ) { JsonObject(readBytes().decodeToString()) }
+            ?.getStringOrNull("license")
+            ?.let { Base64.decode(it) }
     }
 
     private suspend inline fun <T> httpGet(

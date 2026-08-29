@@ -94,6 +94,10 @@ class AppState(private val context: Context) {
         downloadManager.updateLanguage(value)
     }
 
+    fun setPreferAtmos(value: Boolean) {
+        dataStore.setPreferAtmos(value)
+    }
+
     fun setSaveByAlbum(value: Boolean) {
         dataStore.setSaveByAlbum(value)
     }

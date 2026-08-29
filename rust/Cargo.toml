@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aes = "0.9"
-bytes = "1.10"
+cbc = "0.2"
 ctr = "0.10"
 jni = "0.22"
 mp4ameta = "0.13"

@@ -1,12 +1,12 @@
 # AMDL (Apple Music Downloader)
 
-此项目是一个用于下载 Apple Music 有损音乐的 Android 工具，需要 Apple Music 订阅。
+此项目是一个用于下载 Apple Music 有损音乐的 Android 工具，**需要 Apple Music 订阅**。
 
 ## 功能
 
-- 解析 **歌曲、专辑 URL** 内的歌曲
-- 下载 **AAC 44.1kHz 256kbps** 规格的音乐
-- 写入元数据并内嵌高清封面
+- 解析 **歌曲、专辑 URL** 并下载歌曲
+- 支持 **AAC LC 48 kHz 256 kbps** 或 **E-AC-3 JOC 48 kHz 768 kbps** 格式
+- 写入元数据、内嵌高清封面、内嵌 LRC 歌词
 - 下载 TTML 格式的逐字歌词
 
 ## 许可证

@@ -54,6 +54,19 @@ fun SettingsScene(appState: AppState) {
             )
         }
 
+        SettingsListSection("音频") {
+            SettingsListItem(
+                title = "空间音频",
+                subtitle = "下载 E-AC-3 JOC 格式的音频文件（若可用）",
+                action = {
+                    Switch(
+                        checked = { appState.config.preferAtmos },
+                        onCheckedChange = { appState.setPreferAtmos(it) }
+                    )
+                }
+            )
+        }
+
         SettingsListSection("下载") {
             SettingsListItem(
                 title = "下载位置",
