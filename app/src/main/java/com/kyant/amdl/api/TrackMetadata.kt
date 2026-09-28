@@ -1,6 +1,5 @@
 package com.kyant.amdl.api
 
-import android.util.Log
 import com.kyant.amdl.downloader.UserConfig
 import com.kyant.amdl.engine.M4aIdent
 import com.kyant.amdl.engine.M4aTagger
@@ -53,15 +52,7 @@ data class TrackMetadata(
         isrc?.let { tagger.setIsrc(it) }
         copyright?.let { tagger.setStringTag(M4aIdent.Copyright, it) }
         isCompilation?.takeIf { it }?.let { tagger.setCompilation() }
-        lyrics?.let { ttml ->
-            val lrc = try {
-                ttmlToLrc(ttml)
-            } catch (e: Exception) {
-                Log.w("AMDL", "Failed to convert lyrics to LRC", e)
-                null
-            }
-            lrc?.let { tagger.setStringTag(M4aIdent.Lyrics, it) }
-        }
+        lyrics?.let { tagger.setStringTag(M4aIdent.Lyrics, ttmlToLrc(it)) }
     }
 
     fun getFileName(config: UserConfig): String {
