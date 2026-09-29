@@ -79,7 +79,13 @@ private fun String.toLrcTime(): String {
             acc * 60 + part.toDouble()
         }
     } else {
-        value.toDouble()
+        when {
+            value.endsWith("ms") -> value.dropLast(2).toDouble() / 1000
+            value.endsWith("s") -> value.dropLast(1).toDouble()
+            value.endsWith("m") -> value.dropLast(1).toDouble() * 60
+            value.endsWith("h") -> value.dropLast(1).toDouble() * 3600
+            else -> value.toDouble()
+        }
     }
 
     val min = (seconds / 60).toInt()
